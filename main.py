@@ -14,7 +14,7 @@ ctk.set_default_color_theme("blue")
 
 class LightweightFlowTracker:
     """
-    Extracts all UNSW-NB15 features from PCAP with computational cost tracking.
+    Extracts all UNSW-NB15 features from PCAP with PER-FEATURE computational cost tracking.
     Memory-optimized with 100 packets per flow limit (deque).
     """
     
@@ -24,9 +24,9 @@ class LightweightFlowTracker:
         self.packet_count = 0
         self.start_time = None
         
-        # Computational Cost Tracking (Nanoseconds)
-        self.cost_accumulators = defaultdict(float)
-        self.cost_counts = defaultdict(int)
+        # PER-FEATURE Computational Cost Tracking (Nanoseconds)
+        self.feature_costs = defaultdict(float)
+        self.feature_counts = defaultdict(int)
 
     def get_flow_key(self, pkt):
         """Create bidirectional flow key"""
@@ -72,7 +72,7 @@ class LightweightFlowTracker:
                 'proto': self.get_protocol_name(proto),
                 
                 # State
-                'state': 'INT',  # Will be updated based on TCP flags
+                'state': 'INT',
                 'start_time': timestamp, 'last_time': timestamp,
                 
                 # Counters
@@ -80,7 +80,7 @@ class LightweightFlowTracker:
                 'fwd_bytes': 0, 'bwd_bytes': 0,
                 'totpkts': 0, 'totbytes': 0,
                 
-                # Deques with maxlen=100 for memory optimization
+                # Deques with maxlen=100
                 'timestamps': deque(maxlen=100),
                 'pkt_lengths': deque(maxlen=100),
                 'header_lengths': deque(maxlen=100),
@@ -103,7 +103,7 @@ class LightweightFlowTracker:
                 'last_fwd_time': None, 'last_bwd_time': None,
                 'last_flow_time': timestamp,
                 
-                # Service (will be determined by port)
+                # Service
                 'service': self.get_service(dport, sport, proto)
             }
             self.flows[flow_key]['timestamps'].append(timestamp)
@@ -168,14 +168,14 @@ class LightweightFlowTracker:
             if tcp_flags & 0x08: flow['psh_count'] += 1
             if tcp_flags & 0x04: flow['rst_count'] += 1
             
-            # Update state based on flags
-            if tcp_flags & 0x02 and tcp_flags & 0x10:  # SYN-ACK
+            # Update state
+            if tcp_flags & 0x02 and tcp_flags & 0x10:
                 flow['state'] = 'CON'
-            elif tcp_flags & 0x01:  # FIN
+            elif tcp_flags & 0x01:
                 flow['state'] = 'FIN'
-            elif tcp_flags & 0x04:  # RST
+            elif tcp_flags & 0x04:
                 flow['state'] = 'RST'
-            elif flow['state'] == 'INT' and tcp_flags & 0x10:  # ACK
+            elif flow['state'] == 'INT' and tcp_flags & 0x10:
                 flow['state'] = 'CON'
             
         self.packet_count += 1
@@ -187,7 +187,6 @@ class LightweightFlowTracker:
     
     def get_service(self, dport, sport, proto):
         """Determine service based on port numbers"""
-        # Common services (simplified)
         services = {
             20: 'ftp-data', 21: 'ftp', 22: 'ssh', 23: 'telnet',
             25: 'smtp', 53: 'dns', 80: 'http', 110: 'pop3',
@@ -195,7 +194,6 @@ class LightweightFlowTracker:
             3389: 'rdp', 5432: 'postgresql', 8080: 'http-alt'
         }
         
-        # Check destination port first, then source
         if dport in services:
             return services[dport]
         elif sport in services:
@@ -203,29 +201,35 @@ class LightweightFlowTracker:
         else:
             return '-'
 
-    def measure_block(self, name, func):
-        """Measure execution time in nanoseconds"""
+    def measure_feature(self, feature_name, func):
+        """Measure execution time for a SINGLE feature in nanoseconds"""
         t0 = time.perf_counter_ns()
         result = func()
         t1 = time.perf_counter_ns()
-        self.cost_accumulators[name] += (t1 - t0)
-        self.cost_counts[name] += 1
+        self.feature_costs[feature_name] += (t1 - t0)
+        self.feature_counts[feature_name] += 1
         return result
 
     def extract_features(self, flow_key):
-        """Extract all UNSW-NB15 features with cost measurement"""
+        """Extract all UNSW-NB15 features with PER-FEATURE cost measurement"""
         flow = self.flows[flow_key]
         features = {}
         
-        # Convert deques to lists for calculations
+        # Convert deques to lists
         ts = list(flow['timestamps'])
         pkt_lens = list(flow['pkt_lengths'])
         fwd_lens = list(flow['fwd_pkt_lens'])
         bwd_lens = list(flow['bwd_pkt_lens'])
+        fwd_iats = list(flow['fwd_iats'])
+        bwd_iats = list(flow['bwd_iats'])
+        flow_iats = list(flow['flow_iats'])
+        ttls = list(flow['ttl_values'])
+        wins = list(flow['window_sizes'])
+        tcp_flags_list = list(flow['tcp_flags'])
         
         dur = max(flow['last_time'] - flow['start_time'], 1e-6)
         
-        # Basic identifiers
+        # Identifiers (no cost tracking for these)
         features['srcip'] = flow['srcip']
         features['sport'] = flow['sport']
         features['dstip'] = flow['dstip']
@@ -234,90 +238,100 @@ class LightweightFlowTracker:
         features['state'] = flow['state']
         features['service'] = flow['service']
         
-        # 1. Duration and Basic Counts
-        def calc_basic():
-            return {
-                'dur': dur,
-                'sbytes': flow['fwd_bytes'],
-                'dbytes': flow['bwd_bytes'],
-                'sttl': int(np.mean(flow['ttl_values'])) if flow['ttl_values'] else 0,
-                'dttl': int(np.mean(flow['ttl_values'])) if flow['ttl_values'] else 0,  # Simplified
-                'sloss': 0,  # Would need sequence analysis
-                'dloss': 0,  # Would need sequence analysis
-                'Sload': (flow['fwd_bytes'] * 8) / dur if dur > 0 else 0,
-                'Dload': (flow['bwd_bytes'] * 8) / dur if dur > 0 else 0,
-                'Spkts': flow['fwd_pkts'],
-                'Dpkts': flow['bwd_pkts']
-            }
-        features.update(self.measure_block('Basic_Metrics', calc_basic))
+        # MEASURE EACH FEATURE INDIVIDUALLY
         
-        # 2. Inter-Arrival Time Features
-        def calc_iat():
-            fwd_iats = list(flow['fwd_iats'])
-            bwd_iats = list(flow['bwd_iats'])
-            flow_iats = list(flow['flow_iats'])
-            
-            return {
-                'smeansz': np.mean(fwd_lens) if fwd_lens else 0,
-                'dmeansz': np.mean(bwd_lens) if bwd_lens else 0,
-                'trans_depth': 1,  # Simplified
-                'res_bdy_len': sum(bwd_lens),
-                'Sjit': np.std(fwd_iats) if len(fwd_iats) > 1 else 0,
-                'Djit': np.std(bwd_iats) if len(bwd_iats) > 1 else 0,
-                'Stime': flow['start_time'],
-                'Ltime': flow['last_time'],
-                'Sintpkt': np.mean(fwd_iats) if fwd_iats else 0,
-                'Dintpkt': np.mean(bwd_iats) if bwd_iats else 0,
-                'tcprtt': 0,  # Would need SYN/ACK timing
-                'synack': 0,  # Would need SYN/ACK timing
-                'ackdat': 0   # Would need ACK timing
-            }
-        features.update(self.measure_block('IAT_Features', calc_iat))
+        # Duration
+        features['dur'] = self.measure_feature('dur', lambda: dur)
         
-        # 3. TCP Window Features
-        def calc_window():
-            wins = list(flow['window_sizes'])
-            return {
-                'smean': np.mean(wins) if wins else 0,
-                'dmean': np.mean(wins) if wins else 0,  # Simplified
-                'ct_state_ttl': len(set(flow['ttl_values'])) if flow['ttl_values'] else 0,
-                'ct_flw_http_mthd': 0,  # Would need payload analysis
-                'is_ftp_login': 1 if flow['service'] == 'ftp' else 0,
-                'ct_ftp_cmd': 0,  # Would need payload analysis
-                'ct_srv_src': 1,  # Simplified
-                'ct_srv_dst': 1,  # Simplified
-                'ct_dst_ltm': 1,  # Simplified
-                'ct_src_ltm': 1,  # Simplified
-                'ct_src_dport_ltm': 1,  # Simplified
-                'ct_dst_sport_ltm': 1,  # Simplified
-                'ct_dst_src_ltm': 1   # Simplified
-            }
-        features.update(self.measure_block('Window_Features', calc_window))
+        # Bytes
+        features['sbytes'] = self.measure_feature('sbytes', lambda: flow['fwd_bytes'])
+        features['dbytes'] = self.measure_feature('dbytes', lambda: flow['bwd_bytes'])
         
-        # 4. Flag-based Features
-        def calc_flags():
-            tcp_flags_list = list(flow['tcp_flags'])
-            return {
-                'is_sm_ips_ports': 1 if flow['srcip'] == flow['dstip'] and flow['sport'] == flow['dsport'] else 0,
-                'swin': flow['window_sizes'][0] if flow['window_sizes'] else 0,
-                'dwin': flow['window_sizes'][-1] if len(flow['window_sizes']) > 1 else 0,
-                'stcpb': sum(1 for f in tcp_flags_list if f & 0x02),  # SYN count
-                'dtcpb': sum(1 for f in tcp_flags_list if f & 0x10),  # ACK count
-                'tcprtt': 0,  # Simplified
-                'synack': 0,  # Simplified
-                'ackdat': 0   # Simplified
-            }
-        features.update(self.measure_block('Flag_Features', calc_flags))
+        # TTL
+        features['sttl'] = self.measure_feature('sttl', lambda: int(np.mean(ttls)) if ttls else 0)
+        features['dttl'] = self.measure_feature('dttl', lambda: int(np.mean(ttls)) if ttls else 0)
+        
+        # Loss (simplified)
+        features['sloss'] = self.measure_feature('sloss', lambda: 0)
+        features['dloss'] = self.measure_feature('dloss', lambda: 0)
+        
+        # Load
+        features['Sload'] = self.measure_feature('Sload', lambda: (flow['fwd_bytes'] * 8) / dur if dur > 0 else 0)
+        features['Dload'] = self.measure_feature('Dload', lambda: (flow['bwd_bytes'] * 8) / dur if dur > 0 else 0)
+        
+        # Packets
+        features['Spkts'] = self.measure_feature('Spkts', lambda: flow['fwd_pkts'])
+        features['Dpkts'] = self.measure_feature('Dpkts', lambda: flow['bwd_pkts'])
+        
+        # Mean sizes
+        features['smeansz'] = self.measure_feature('smeansz', lambda: np.mean(fwd_lens) if fwd_lens else 0)
+        features['dmeansz'] = self.measure_feature('dmeansz', lambda: np.mean(bwd_lens) if bwd_lens else 0)
+        
+        # Transaction depth
+        features['trans_depth'] = self.measure_feature('trans_depth', lambda: 1)
+        
+        # Response body length
+        features['res_bdy_len'] = self.measure_feature('res_bdy_len', lambda: sum(bwd_lens))
+        
+        # Jitter
+        features['Sjit'] = self.measure_feature('Sjit', lambda: np.std(fwd_iats) if len(fwd_iats) > 1 else 0)
+        features['Djit'] = self.measure_feature('Djit', lambda: np.std(bwd_iats) if len(bwd_iats) > 1 else 0)
+        
+        # Times
+        features['Stime'] = self.measure_feature('Stime', lambda: flow['start_time'])
+        features['Ltime'] = self.measure_feature('Ltime', lambda: flow['last_time'])
+        
+        # Inter-packet times
+        features['Sintpkt'] = self.measure_feature('Sintpkt', lambda: np.mean(fwd_iats) if fwd_iats else 0)
+        features['Dintpkt'] = self.measure_feature('Dintpkt', lambda: np.mean(bwd_iats) if bwd_iats else 0)
+        
+        # TCP RTT (simplified)
+        features['tcprtt'] = self.measure_feature('tcprtt', lambda: 0)
+        features['synack'] = self.measure_feature('synack', lambda: 0)
+        features['ackdat'] = self.measure_feature('ackdat', lambda: 0)
+        
+        # Window means
+        features['smean'] = self.measure_feature('smean', lambda: np.mean(wins) if wins else 0)
+        features['dmean'] = self.measure_feature('dmean', lambda: np.mean(wins) if wins else 0)
+        
+        # State TTL
+        features['ct_state_ttl'] = self.measure_feature('ct_state_ttl', lambda: len(set(ttls)) if ttls else 0)
+        
+        # HTTP/FTP (simplified)
+        features['ct_flw_http_mthd'] = self.measure_feature('ct_flw_http_mthd', lambda: 0)
+        features['is_ftp_login'] = self.measure_feature('is_ftp_login', lambda: 1 if flow['service'] == 'ftp' else 0)
+        features['ct_ftp_cmd'] = self.measure_feature('ct_ftp_cmd', lambda: 0)
+        
+        # Connection counts (simplified)
+        features['ct_srv_src'] = self.measure_feature('ct_srv_src', lambda: 1)
+        features['ct_srv_dst'] = self.measure_feature('ct_srv_dst', lambda: 1)
+        features['ct_dst_ltm'] = self.measure_feature('ct_dst_ltm', lambda: 1)
+        features['ct_src_ltm'] = self.measure_feature('ct_src_ltm', lambda: 1)
+        features['ct_src_dport_ltm'] = self.measure_feature('ct_src_dport_ltm', lambda: 1)
+        features['ct_dst_sport_ltm'] = self.measure_feature('ct_dst_sport_ltm', lambda: 1)
+        features['ct_dst_src_ltm'] = self.measure_feature('ct_dst_src_ltm', lambda: 1)
+        
+        # Same IP/ports
+        features['is_sm_ips_ports'] = self.measure_feature('is_sm_ips_ports', 
+            lambda: 1 if flow['srcip'] == flow['dstip'] and flow['sport'] == flow['dsport'] else 0)
+        
+        # Windows
+        features['swin'] = self.measure_feature('swin', lambda: wins[0] if wins else 0)
+        features['dwin'] = self.measure_feature('dwin', lambda: wins[-1] if len(wins) > 1 else 0)
+        
+        # TCP base
+        features['stcpb'] = self.measure_feature('stcpb', lambda: sum(1 for f in tcp_flags_list if f & 0x02))
+        features['dtcpb'] = self.measure_feature('dtcpb', lambda: sum(1 for f in tcp_flags_list if f & 0x10))
         
         return features
 
-    def get_avg_costs(self):
-        """Return average cost per feature group in microseconds"""
+    def get_feature_costs(self):
+        """Return average cost per feature in microseconds"""
         avg_costs = {}
-        for key, total_ns in self.cost_accumulators.items():
-            count = self.cost_counts[key]
+        for feature_name, total_ns in self.feature_costs.items():
+            count = self.feature_counts[feature_name]
             if count > 0:
-                avg_costs[key] = (total_ns / count) / 1000.0  # ns to μs
+                avg_costs[feature_name] = (total_ns / count) / 1000.0  # ns to μs
         return avg_costs
 
     def get_all_features(self):
@@ -333,7 +347,7 @@ class PacketToolApp(ctk.CTk):
         # Header
         self.lbl_title = ctk.CTkLabel(
             self, 
-            text="UNSW-NB15 Feature Extractor (All Features + Cost Analysis)", 
+            text="UNSW-NB15 Feature Extractor (Per-Feature Cost Analysis)", 
             font=("Arial", 20, "bold")
         )
         self.lbl_title.pack(pady=20)
@@ -401,14 +415,14 @@ class PacketToolApp(ctk.CTk):
         
         # Welcome Message
         self.log("="*90)
-        self.log("UNSW-NB15 Complete Feature Extractor - Raspberry Pi Optimized")
+        self.log("UNSW-NB15 Complete Feature Extractor - Per-Feature Cost Tracking")
         self.log("="*90)
         self.log("\nFeatures:")
         self.log("  • Extracts ALL UNSW-NB15 dataset features")
-        self.log("  • 100 packets max per flow (Memory Optimized for Raspberry Pi)")
-        self.log("  • Real-time Computational Cost Tracking (nanosecond precision)")
+        self.log("  • 100 packets max per flow (Memory Optimized)")
+        self.log("  • PER-FEATURE Computational Cost Tracking (nanosecond precision)")
         self.log("  • Ground Truth Labeling with bidirectional matching")
-        self.log("  • Generates 2 CSV files: Labeled Dataset + Cost Analysis")
+        self.log("  • Generates 2 CSV files: Labeled Dataset + Per-Feature Cost Analysis")
         self.log("\nReady. Please select PCAP and Ground Truth CSV files.")
         self.log("="*90 + "\n")
 
@@ -561,14 +575,14 @@ class PacketToolApp(ctk.CTk):
             self.log("[4/4] Generating Output Files...")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             
-            # Reorder columns - attack_cat at the end
+            # Reorder columns
             cols = list(df.columns)
             if 'attack_cat' in cols:
                 cols.remove('attack_cat')
                 cols.append('attack_cat')
             df = df[cols]
             
-            # Save Labeled Dataset
+            # Save Dataset
             dataset_file = f"UNSW_NB15_Complete_{timestamp}.csv"
             df.to_csv(dataset_file, index=False)
             self.log(f"✓ Saved Complete Dataset: {dataset_file}")
@@ -582,46 +596,72 @@ class PacketToolApp(ctk.CTk):
                 percentage = (count / len(df)) * 100
                 self.log(f"  {label:25s}: {count:6,} ({percentage:5.2f}%)")
 
-            # Save Computational Cost Analysis
-            costs = tracker.get_avg_costs()
+            # Save PER-FEATURE Computational Cost Analysis
+            costs = tracker.get_feature_costs()
             
             cost_data = []
             self.log(f"\n" + "="*90)
-            self.log("COMPUTATIONAL COST ANALYSIS (Measured in Real-Time)")
+            self.log("PER-FEATURE COMPUTATIONAL COST ANALYSIS")
             self.log("="*90)
+            self.log(f"Total Features Measured: {len(costs)}\n")
             
-            total_cost = 0
-            for group, cost_us in costs.items():
-                total_cost += cost_us
-                
-                # Status determination
-                if cost_us < 10:
+            # Sort by cost
+            sorted_costs = sorted(costs.items(), key=lambda x: x[1], reverse=True)
+            
+            for feature_name, cost_us in sorted_costs[:10]:  # Show top 10 most expensive
+                if cost_us < 1:
                     status = 'EXCELLENT'
-                elif cost_us < 50:
+                elif cost_us < 10:
                     status = 'GOOD'
-                elif cost_us < 100:
+                elif cost_us < 50:
                     status = 'ACCEPTABLE'
                 else:
                     status = 'CAUTION'
                 
-                self.log(f"\n{group}:")
-                self.log(f"  Average Cost:      {cost_us:.6f} μs per flow")
-                self.log(f"  RPi Status:        {status}")
-                self.log(f"  Executions:        {tracker.cost_counts[group]:,}")
+                self.log(f"{feature_name:25s}: {cost_us:10.6f} μs  [{status}]")
+            
+            self.log(f"\n... and {len(costs)-10} more features")
+            
+            # Create full cost table
+            for feature_name, cost_us in costs.items():
+                if cost_us < 1:
+                    status = 'EXCELLENT'
+                    complexity = 'O(1)'
+                elif cost_us < 10:
+                    status = 'GOOD'
+                    complexity = 'O(1)'
+                elif cost_us < 50:
+                    status = 'ACCEPTABLE'
+                    complexity = 'O(n)'
+                else:
+                    status = 'CAUTION'
+                    complexity = 'O(n)'
                 
                 cost_data.append({
-                    'Feature_Group': group,
+                    'Feature_Name': feature_name,
                     'Avg_Cost_Microseconds': round(cost_us, 6),
-                    'Total_Executions': tracker.cost_counts[group],
+                    'Total_Executions': tracker.feature_counts[feature_name],
                     'Raspberry_Pi_Status': status,
-                    'Total_Time_Seconds': round((cost_us * tracker.cost_counts[group]) / 1_000_000, 6)
+                    'Estimated_Complexity': complexity
                 })
             
-            self.log(f"\nTotal Average Cost per Flow: {total_cost:.6f} μs")
+            cost_file = f"Per_Feature_Costs_{timestamp}.csv"
+            df_cost = pd.DataFrame(cost_data)
+            # Sort by cost descending
+            df_cost = df_cost.sort_values('Avg_Cost_Microseconds', ascending=False)
+            df_cost.to_csv(cost_file, index=False)
+            self.log(f"\n✓ Saved Per-Feature Cost Report: {cost_file}")
+            self.log(f"  → Total Features Analyzed: {len(cost_data)}")
             
-            cost_file = f"Computational_Costs_{timestamp}.csv"
-            pd.DataFrame(cost_data).to_csv(cost_file, index=False)
-            self.log(f"\n✓ Saved Computational Cost Report: {cost_file}")
+            # Statistics
+            total_cost = sum(costs.values())
+            avg_cost = np.mean(list(costs.values()))
+            
+            self.log(f"\nCost Statistics:")
+            self.log(f"  Total Cost (all features): {total_cost:.6f} μs per flow")
+            self.log(f"  Average Cost per feature:  {avg_cost:.6f} μs")
+            self.log(f"  Min Cost:                  {min(costs.values()):.6f} μs")
+            self.log(f"  Max Cost:                  {max(costs.values()):.6f} μs")
             
             # Final Summary
             self.log("\n" + "="*90)
@@ -635,8 +675,8 @@ class PacketToolApp(ctk.CTk):
             self.log(f"Memory Limit per Flow:       100 packets (deque)")
             self.log(f"Processing Time:             {time.time() - tracker.start_time:.2f} seconds")
             self.log(f"\nOutput Files:")
-            self.log(f"  1. {dataset_file}")
-            self.log(f"  2. {cost_file}")
+            self.log(f"  1. {dataset_file} - Complete labeled dataset")
+            self.log(f"  2. {cost_file} - Per-feature computational costs")
             
             self.log("\n" + "="*90)
             self.log("✓ ALL TASKS COMPLETED SUCCESSFULLY")
