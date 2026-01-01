@@ -8,6 +8,35 @@ import sys  # <--- NEW IMPORT ADDED HERE
 from collections import defaultdict, deque
 from scapy.all import PcapReader, IP, TCP, UDP, Raw
 
+import customtkinter as ctk
+import threading
+import pandas as pd
+import numpy as np
+import os
+import sys
+from scapy.all import PcapReader, IP, TCP, UDP
+from collections import defaultdict
+from datetime import datetime
+import time
+
+# Try to import psutil, but don't fail if it's not available
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+
+# Fix for PyInstaller - Set CustomTkinter assets path
+if getattr(sys, 'frozen', False):
+    # Running as compiled executable
+    import customtkinter
+    customtkinter.set_default_color_theme("blue")
+    customtkinter.set_appearance_mode("Dark")
+else:
+    # Running as script
+    ctk.set_appearance_mode("Dark")
+    ctk.set_default_color_theme("blue")
+
 # --- CONFIGURATION ---
 INPUT_PCAP = "your_traffic.pcap"        # <--- REPLACE WITH YOUR PCAP FILE
 GROUND_TRUTH = "your_gt.csv"            # <--- REPLACE WITH YOUR GT CSV
