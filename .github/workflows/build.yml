@@ -1,4 +1,5 @@
 name: Build Windows EXE
+
 on:
   push:
     branches: [ "main" ]
@@ -9,7 +10,8 @@ jobs:
     runs-on: windows-latest
     
     steps:
-    - uses: actions/checkout@v3
+    - name: Checkout Code
+      uses: actions/checkout@v3
     
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -19,13 +21,13 @@ jobs:
     - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller customtkinter scapy numpy pandas psutil
+        pip install pyinstaller customtkinter scapy numpy pandas psutil pillow
     
-    - name: Build EXE using spec file
+    - name: Build EXE with Console (to see errors)
       run: |
-        pyinstaller build.spec
+        pyinstaller --noconfirm --onefile --console --name "UNSW_Feature_Extractor" --collect-all customtkinter --hidden-import=PIL._tkinter_finder main.py
     
-    - name: Upload Artifact
+    - name: Upload EXE
       uses: actions/upload-artifact@v4
       with:
         name: Windows-Executable
