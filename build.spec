@@ -1,10 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 import sys
-from pathlib import Path
+import os
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
-# Get CustomTkinter path
-import customtkinter
-ctk_path = Path(customtkinter.__file__).parent
+# Collect CustomTkinter data
+customtkinter_datas = collect_data_files('customtkinter')
 
 block_cipher = None
 
@@ -12,15 +12,15 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[
-        (str(ctk_path), 'customtkinter'),  # Bundle CustomTkinter
-    ],
+    datas=customtkinter_datas,
     hiddenimports=[
         'customtkinter',
+        'PIL._tkinter_finder',
         'scapy.all',
+        'scapy.layers.inet',
         'numpy',
         'pandas',
-        'psutil'
+        'psutil',
     ],
     hookspath=[],
     hooksconfig={},
@@ -48,11 +48,10 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,  # Set to True for debugging
+    console=True,  # SET TO True FOR DEBUGGING, False for release
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None  # Add your icon path here if you have one
 )
